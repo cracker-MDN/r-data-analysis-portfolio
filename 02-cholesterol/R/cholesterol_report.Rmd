@@ -1,0 +1,307 @@
+---
+title: "Does a Margarine Diet Reduce Cholesterol — And For Whom Does It Work Best?"
+subtitle: "Paired t-Tests, Effect Sizes & Repeated-Measures Analysis"
+author: "[MD Noornabi] | Mayerfeld Data Analytics Certificate"
+date: "March 2026"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE,
+                      fig.width=8, fig.height=5, dpi=150)
+knitr::opts_knit$set(root.dir = "C:/Users/Sam Fisher/Desktop/Cholesterol/02-cholesterol")
+```
+
+---
+
+## Background
+
+18 participants followed a low-fat diet incorporating margarine containing **2.31g of stanol ester per day** (active ingredient) over 8 weeks. Two margarine types were used — A (n=9) and B (n=9). Cholesterol was measured at **baseline**, **4 weeks**, and **8 weeks**.
+
+Three questions drive this analysis:
+
+1. Does the diet significantly reduce cholesterol?
+2. Does the effect continue after week 4, or plateau?
+3. Does baseline cholesterol predict how much someone benefits?
+
+---
+
+## Setup
+
+```{r libraries}
+library(tidyverse)
+library(ggplot2)
+library(moments)
+
+mytheme <- theme_minimal(base_size=13) +
+  theme(plot.title=element_text(face="bold",size=14),
+        plot.subtitle=element_text(color="grey40",size=11))
+
+cohens_d_paired <- function(x, y) { d <- x - y; mean(d)/sd(d) }
+```
+
+```{r load-data}
+chol <- read.csv("data/Cholesterol.csv")
+chol$Margarine <- factor(chol$Margarine)
+chol <- chol %>% mutate(
+  reduction_4wk     = Before - After4weeks,
+  reduction_8wk     = Before - After8weeks,
+  reduction_4_to_8  = After4weeks - After8weeks,
+  pct_reduction_8wk = (Before - After8weeks) / Before * 100
+)
+typeA <- chol %>% filter(Margarine=="A")
+typeB <- chol %>% filter(Margarine=="B")
+cat("n =", nrow(chol), "| Type A:", nrow(typeA), "| Type B:", nrow(typeB))
+```
+
+---
+
+## 1. Descriptive Statistics
+
+```{r descriptives}
+data.frame(
+  Timepoint      = c("Before","After 4 Weeks","After 8 Weeks"),
+  Mean           = round(c(mean(chol$Before),mean(chol$After4weeks),mean(chol$After8weeks)),4),
+  SD             = round(c(sd(chol$Before),  sd(chol$After4weeks),  sd(chol$After8weeks)),4),
+  Min            = c(min(chol$Before),min(chol$After4weeks),min(chol$After8weeks)),
+  Max            = c(max(chol$Before),max(chol$After4weeks),max(chol$After8weeks)),
+  Mean_Reduction = round(c(0, mean(chol$reduction_4wk), mean(chol$reduction_8wk)), 4)
+)
+```
+
+```{r trend-plot, fig.cap="Figure 1: Cholesterol falls sharply by week 4, then continues more gradually to week 8."}
+time_means <- data.frame(
+  Timepoint=factor(c("Before","After 4 Weeks","After 8 Weeks"),
+                   levels=c("Before","After 4 Weeks","After 8 Weeks")),
+  Mean=c(mean(chol$Before),mean(chol$After4weeks),mean(chol$After8weeks)),
+  SD  =c(sd(chol$Before),  sd(chol$After4weeks),  sd(chol$After8weeks))
+)
+ggplot(time_means, aes(Timepoint, Mean, group=1)) +
+  geom_ribbon(aes(ymin=Mean-SD, ymax=Mean+SD), fill="#3498db", alpha=0.15) +
+  geom_line(color="#2980b9", linewidth=1.4) +
+  geom_point(size=5, color="#2980b9") +
+  geom_text(aes(label=round(Mean,3)), vjust=-1.5, fontface="bold", size=4.2) +
+  scale_y_continuous(limits=c(4.2,7.8)) +
+  labs(title="Mean Cholesterol Over Time",
+       subtitle="Shaded = ±1 SD  ·  n=18", x=NULL, y="Cholesterol (mmol/L)") + mytheme
+```
+
+### The Rate Question: When Does the Effect Work Hardest?
+
+```{r rate-of-reduction, fig.cap="Figure 2: The diet works roughly 9× faster in the first 4 weeks than the second 4 weeks."}
+rate_df <- data.frame(
+  Period    = factor(c("Weeks 0–4","Weeks 4–8"), levels=c("Weeks 0–4","Weeks 4–8")),
+  Reduction = c(mean(chol$reduction_4wk), mean(chol$reduction_4_to_8))
+)
+ggplot(rate_df, aes(Period, Reduction, fill=Period)) +
+  geom_col(width=0.45, alpha=0.85) +
+  geom_text(aes(label=round(Reduction,3)), vjust=-0.5, fontface="bold", size=5) +
+  scale_fill_manual(values=c("Weeks 0–4"="#2980b9","Weeks 4–8"="#85c1e9")) +
+  scale_y_continuous(limits=c(0,0.75)) +
+  labs(title="Rate of Cholesterol Reduction by Period",
+       subtitle="Most reduction happens in weeks 0–4; effect plateaus but continues",
+       x=NULL, y="Mean Reduction (mmol/L)") +
+  mytheme + theme(legend.position="none")
+```
+
+> **Insight:** `r round(mean(chol$reduction_4wk),3)` mmol/L reduction in weeks 0–4 vs only `r round(mean(chol$reduction_4_to_8),3)` mmol/L in weeks 4–8. The first four weeks drive **`r round(mean(chol$reduction_4wk)/mean(chol$reduction_8wk)*100)`%** of the total 8-week reduction.
+
+---
+
+## 2. Normality of Differences
+
+```{r normality}
+pairs_list <- list(
+  list(x=chol$Before, y=chol$After4weeks, label="Before − After4weeks"),
+  list(x=chol$Before, y=chol$After8weeks, label="Before − After8weeks"),
+  list(x=chol$After4weeks, y=chol$After8weeks, label="After4 − After8weeks")
+)
+map_dfr(pairs_list, function(p) {
+  sw <- shapiro.test(p$x - p$y)
+  tibble(Comparison=p$label, W=round(sw$statistic,4),
+         p=round(sw$p.value,4),
+         Result=ifelse(sw$p.value>0.05,"Normal ✓","Not Normal ✗"))
+})
+```
+
+All difference distributions are normal — paired t-tests are appropriate.
+
+---
+
+## 3. Paired T-Tests
+
+```{r paired-overall}
+map_dfr(pairs_list, function(p) {
+  tt <- t.test(p$x, p$y, paired=TRUE)
+  d  <- cohens_d_paired(p$x, p$y)
+  tibble(
+    Comparison  = p$label,
+    `Mean Diff` = round(mean(p$x - p$y), 4),
+    `t-stat`    = round(tt$statistic, 4),
+    df          = tt$parameter,
+    `p-value`   = round(tt$p.value, 6),
+    Sig         = ifelse(tt$p.value<0.05,"Yes **","No"),
+    `Cohen's d` = round(d,4),
+    Effect      = ifelse(abs(d)>=0.8,"Large",ifelse(abs(d)>=0.5,"Medium","Small"))
+  )
+})
+```
+
+> All three comparisons are highly significant. Cohen's d > 3.5 is exceptional — this is one of the largest effect sizes routinely observed in nutrition intervention studies.
+
+```{r spaghetti, fig.cap="Figure 3: Every participant shows a downward trajectory. No crossovers — the diet worked consistently across all 18 individuals."}
+chol_long <- chol %>%
+  pivot_longer(c(Before, After4weeks, After8weeks),
+               names_to="Timepoint", values_to="Cholesterol") %>%
+  mutate(Timepoint=factor(Timepoint,
+         levels=c("Before","After4weeks","After8weeks"),
+         labels=c("Before","4 Weeks","8 Weeks")))
+
+ggplot(chol_long, aes(Timepoint, Cholesterol, group=ID, color=Margarine)) +
+  geom_line(alpha=0.55, linewidth=0.9) +
+  geom_point(size=2.5, alpha=0.85) +
+  scale_color_manual(values=c("A"="#e67e22","B"="#8e44ad")) +
+  stat_summary(aes(group=1), fun=mean, geom="line",
+               color="black", linewidth=2, linetype="dashed") +
+  labs(title="Individual Cholesterol Trajectories",
+       subtitle="Each line = 1 participant  ·  Dashed = group mean  ·  Colour = margarine type",
+       x=NULL, y="Cholesterol (mmol/L)", color="Margarine") + mytheme
+```
+
+```{r before-after, fig.cap="Figure 4: Every point sits below the diagonal, confirming universal reduction. Scatter around the regression line reflects variation in baseline, not direction of change."}
+ggplot(chol, aes(Before, After8weeks, color=Margarine)) +
+  geom_point(size=3.5, alpha=0.85) +
+  geom_smooth(method="lm", se=TRUE, aes(group=1), color="#2c3e50", fill="grey70", alpha=0.2) +
+  geom_abline(slope=1, intercept=0, linetype="dashed", color="grey50", linewidth=1) +
+  scale_color_manual(values=c("A"="#e67e22","B"="#8e44ad")) +
+  labs(title="Baseline vs 8-Week Cholesterol",
+       subtitle="Below dashed diagonal = reduction achieved  ·  100% of participants improved",
+       x="Before (mmol/L)", y="After 8 Weeks (mmol/L)", color="Margarine") + mytheme
+```
+
+---
+
+## 4. Individual Variation
+
+```{r pct-reduction, fig.cap="Figure 5: Participants with higher baseline cholesterol tended to achieve larger percentage reductions."}
+ggplot(chol, aes(x=reorder(as.factor(ID), pct_reduction_8wk),
+                 y=pct_reduction_8wk, fill=Margarine)) +
+  geom_col(alpha=0.85) +
+  geom_hline(yintercept=mean(chol$pct_reduction_8wk),
+             linetype="dashed", color="#2c3e50", linewidth=1) +
+  scale_fill_manual(values=c("A"="#e67e22","B"="#8e44ad")) +
+  labs(title="Percentage Cholesterol Reduction at 8 Weeks — Per Participant",
+       subtitle=paste0("Mean: ",round(mean(chol$pct_reduction_8wk),2),
+                       "%  (range: ",round(min(chol$pct_reduction_8wk),1),
+                       "% – ",round(max(chol$pct_reduction_8wk),1),
+                       "%)  ·  Dashed = mean"),
+       x="Participant (ordered by reduction)", y="% Reduction", fill="Margarine") + mytheme
+```
+
+---
+
+## 5. Key Insight: Does Baseline Cholesterol Predict Reduction?
+
+```{r baseline-insight, fig.cap="Figure 6: Significant positive correlation — those who needed it most benefited most."}
+cor_res <- cor.test(chol$Before, chol$reduction_8wk)
+lm_base <- lm(reduction_8wk ~ Before, data=chol)
+
+ggplot(chol, aes(Before, reduction_8wk, color=Margarine)) +
+  geom_point(size=3.5, alpha=0.85) +
+  geom_smooth(method="lm", se=TRUE, aes(group=1), color="#2c3e50", fill="grey70", alpha=0.2) +
+  scale_color_manual(values=c("A"="#e67e22","B"="#8e44ad")) +
+  labs(title="Does Baseline Cholesterol Predict Reduction Achieved?",
+       subtitle=paste0("r = ", round(cor_res$estimate,3),
+                       "  p = ", round(cor_res$p.value,4),
+                       "  ·  Higher baseline → greater absolute reduction"),
+       x="Baseline Cholesterol (mmol/L)", y="Reduction at 8 Weeks (mmol/L)",
+       color="Margarine") + mytheme
+```
+
+```{r baseline-model}
+summary(lm_base)
+```
+
+> **r = `r round(cor_res$estimate, 3)`, p = `r round(cor_res$p.value, 4)`** — statistically significant. Participants entering the study with higher cholesterol achieved greater absolute reductions. This is clinically meaningful: the diet appears most impactful for those at higher cardiovascular risk.
+
+---
+
+## 6. Margarine Type: A vs B
+
+### Are Both Types Individually Effective?
+
+```{r within-type}
+within_results <- map_dfr(list(list(df=typeA, label="Margarine A"),
+                               list(df=typeB, label="Margarine B")), function(m) {
+  map_dfr(list(list(y=m$df$After4weeks, period="Before vs 4 Weeks"),
+               list(y=m$df$After8weeks, period="Before vs 8 Weeks")), function(p) {
+    tt <- t.test(m$df$Before, p$y, paired=TRUE)
+    d  <- cohens_d_paired(m$df$Before, p$y)
+    tibble(Type=m$label, Comparison=p$period,
+           `Mean Diff`=round(mean(m$df$Before-p$y),4),
+           `p-value`=round(tt$p.value,6),
+           `Cohen's d`=round(d,4),
+           Sig=ifelse(tt$p.value<0.05,"Yes **","No"))
+  })
+})
+within_results
+```
+
+Both margarine types are individually effective — significant reductions at both timepoints, with large effect sizes.
+
+### Is One Type Better Than the Other?
+
+```{r between-type}
+map_dfr(list(
+  list(a=typeA$Before,      b=typeB$Before,      tp="Before"),
+  list(a=typeA$After4weeks, b=typeB$After4weeks, tp="After 4 Weeks"),
+  list(a=typeA$After8weeks, b=typeB$After8weeks, tp="After 8 Weeks")
+), function(p) {
+  tt <- t.test(p$a, p$b, var.equal=FALSE)
+  tibble(Timepoint=p$tp, `Mean A`=round(mean(p$a),3), `Mean B`=round(mean(p$b),3),
+         `t-stat`=round(tt$statistic,4), `p-value`=round(tt$p.value,4),
+         Conclusion=ifelse(tt$p.value<0.05,"Significant difference","No significant difference"))
+})
+```
+
+```{r faceted-type, fig.cap="Figure 7: Both types follow the same downward trajectory — no evidence of a meaningful difference."}
+ggplot(chol_long, aes(Timepoint, Cholesterol, group=ID)) +
+  geom_line(alpha=0.5, color="grey60", linewidth=0.8) +
+  geom_point(aes(color=Timepoint), size=2.5) +
+  stat_summary(aes(group=1), fun=mean, geom="line",
+               color="black", linewidth=1.5, linetype="dashed") +
+  facet_wrap(~Margarine, labeller=labeller(Margarine=c("A"="Margarine A","B"="Margarine B"))) +
+  scale_color_manual(values=c("Before"="#e74c3c","4 Weeks"="#f39c12","8 Weeks"="#2ecc71")) +
+  labs(title="Trajectories by Margarine Type",
+       subtitle="Both types: consistent downward trend  ·  Dashed = group mean",
+       x=NULL, y="Cholesterol (mmol/L)", color="Timepoint") + mytheme
+```
+
+The groups were not significantly different at baseline, 4 weeks, or 8 weeks. Either margarine type can be recommended with equal confidence.
+
+---
+
+## 7. Summary
+
+| Finding | Detail |
+|---|---|
+| **Significant reduction at 4 weeks** | −0.566 mmol/L, d = 3.64 (very large) |
+| **Significant reduction at 8 weeks** | −0.629 mmol/L, d = 3.52 (very large) |
+| **Continued improvement 4→8 weeks** | −0.063 mmol/L, p = 0.0015 |
+| **Mean % reduction** | `r round(mean(chol$pct_reduction_8wk),2)`% (range: `r round(min(chol$pct_reduction_8wk),1)`–`r round(max(chol$pct_reduction_8wk),1)`%) |
+| **Rate** | 90% of reduction happens in first 4 weeks |
+| **Baseline predicts benefit** | r = `r round(cor_res$estimate,3)`, p = `r round(cor_res$p.value,4)` — higher risk = more benefit |
+| **Margarine type** | No significant difference — both equally effective |
+| **Universal effect** | 100% of participants improved |
+
+---
+
+*Analysis in R — tidyverse, ggplot2, base stats. Mayerfeld Data Analytics Certificate — Week 2.*
