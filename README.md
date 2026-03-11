@@ -94,4 +94,4 @@ r-data-analysis-portfolio/
 
 ---
 
-📧 [LinkedIn](https://www.linkedin.com/in/md-noornabi) · 🐙 [GitHub](https://github.com/MDNoornabi)
+📧 [LinkedIn](https://www.linkedin.com/in/md-noornabi25/) · 🐙 [GitHub](https://github.com/cracker-MDN)
