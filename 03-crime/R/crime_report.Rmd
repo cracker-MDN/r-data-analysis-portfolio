@@ -1,0 +1,441 @@
+---
+title: "What Predicts Crime? A Socioeconomic Analysis of US States"
+subtitle: "Correlation, Multiple Regression & 10-Year Longitudinal Analysis"
+author: "[MD Noornabi] | Mayerfeld Data Analytics Certificate"
+date: "March 2026"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE,
+                      fig.width=9, fig.height=5, dpi=150)
+knitr::opts_knit$set(root.dir=normalizePath(".."))
+```
+
+---
+
+## Background & Central Question
+
+This analysis uses a dataset of 47 US states measured at two timepoints — **Year 0** and **Year 10** — covering crime rates and 13 socioeconomic variables including wages, education, police expenditure, unemployment, and demographics.
+
+**Three questions drive the analysis:**
+
+1. Which socioeconomic variables significantly predict crime rates?
+2. Are the relationships what we'd intuitively expect — or are there paradoxes that require deeper interpretation?
+3. How stable are crime rates over a decade — and do the same predictors hold at both timepoints?
+
+---
+
+## Setup
+
+```{r libraries}
+library(tidyverse)
+library(ggplot2)
+library(ggcorrplot)
+library(gridExtra)
+library(moments)
+library(scales)
+
+mytheme <- theme_minimal(base_size=13) +
+  theme(plot.title=element_text(face="bold",size=14,color="#1F4E79"),
+        plot.subtitle=element_text(color="grey40",size=11),
+        plot.caption=element_text(color="grey55",size=9,face="italic"),
+        panel.grid.minor=element_blank())
+
+cohens_d <- function(x,y) (mean(x)-mean(y)) / sqrt((sd(x)^2+sd(y)^2)/2)
+```
+
+```{r load-data}
+crime <- read.csv("data/Crime.csv")
+crime$Southern       <- factor(crime$Southern,       levels=c(0,1), labels=c("Non-Southern","Southern"))
+crime$MoreMales      <- factor(crime$MoreMales,       levels=c(0,1), labels=c("No","Yes"))
+crime$HighYouthUnemploy <- factor(crime$HighYouthUnemploy, levels=c(0,1), labels=c("Low","High"))
+crime$LogExpenditure <- log(crime$ExpenditureYear0)
+crime$CrimeChange    <- crime$CrimeRate10 - crime$CrimeRate
+cat("n =", nrow(crime), "states  |  Variables:", ncol(crime))
+```
+
+---
+
+## 1. Exploratory Data Analysis
+
+### Crime Rate Overview
+
+```{r descriptives}
+data.frame(
+  Timepoint = c("Year 0","Year 10"),
+  Mean      = round(c(mean(crime$CrimeRate),mean(crime$CrimeRate10)),2),
+  Median    = round(c(median(crime$CrimeRate),median(crime$CrimeRate10)),2),
+  SD        = round(c(sd(crime$CrimeRate),sd(crime$CrimeRate10)),2),
+  Min       = c(min(crime$CrimeRate),min(crime$CrimeRate10)),
+  Max       = c(max(crime$CrimeRate),max(crime$CrimeRate10))
+)
+```
+
+```{r dist-plot, fig.cap="Figure 1: Crime rate distributions are broadly similar across both timepoints, with slightly greater spread at Year 10."}
+cr_long <- data.frame(
+  CrimeRate = c(crime$CrimeRate,crime$CrimeRate10),
+  Timepoint = rep(c("Year 0","Year 10"),each=nrow(crime))
+)
+ggplot(cr_long, aes(CrimeRate,fill=Timepoint,color=Timepoint)) +
+  geom_histogram(aes(y=after_stat(density)),bins=15,alpha=0.45,position="identity") +
+  geom_density(linewidth=1.1,alpha=0) +
+  geom_vline(xintercept=mean(crime$CrimeRate),  linetype="dashed",color="#2980b9",linewidth=0.9) +
+  geom_vline(xintercept=mean(crime$CrimeRate10),linetype="dashed",color="#e67e22",linewidth=0.9) +
+  scale_fill_manual(values=c("Year 0"="#2980b9","Year 10"="#e67e22")) +
+  scale_color_manual(values=c("Year 0"="#2980b9","Year 10"="#e67e22")) +
+  labs(title="Crime Rate Distribution — Year 0 vs Year 10",
+       subtitle="Dashed lines = group means  ·  n=47 states",
+       x="Crime Rate (offences per million)",y="Density") + mytheme
+```
+
+### Handling Skewed Variables
+
+```{r skewness-check}
+data.frame(
+  Variable      = c("ExpenditureYear0","Log(ExpenditureYear0)","YouthUnemployment","Log(YouthUnemployment)"),
+  Skewness      = round(c(skewness(crime$ExpenditureYear0),
+                           skewness(log(crime$ExpenditureYear0)),
+                           skewness(crime$YouthUnemployment),
+                           skewness(log(crime$YouthUnemployment))),4),
+  Action        = c("Log-transformed","✓ Used in regression","Noted","Not needed — not in final model")
+)
+```
+
+```{r log-transform, fig.cap="Figure 2: Log transformation substantially reduces right skew in police expenditure, making it more appropriate for regression."}
+exp_df <- data.frame(
+  Value = c(crime$ExpenditureYear0,log(crime$ExpenditureYear0)),
+  Type  = rep(c("Original (skewness = 0.92)","Log-transformed (skewness = 0.28)"),each=nrow(crime))
+)
+ggplot(exp_df, aes(Value,fill=Type)) +
+  geom_histogram(bins=15,alpha=0.85,color="white") +
+  facet_wrap(~Type,scales="free_x") +
+  scale_fill_manual(values=c("#e74c3c","#27ae60")) +
+  labs(title="Police Expenditure: Correcting Positive Skew",
+       x="Value",y="Count") +
+  mytheme + theme(legend.position="none")
+```
+
+---
+
+## 2. Correlation Analysis: What Predicts Crime?
+
+```{r correlations}
+cont_vars <- c("Youth","Education","ExpenditureYear0","LabourForce","Males",
+               "StateSize","YouthUnemployment","MatureUnemployment","Wage","BelowWage")
+map_dfr(cont_vars, function(v) {
+  ct <- cor.test(crime[[v]], crime$CrimeRate)
+  tibble(Variable=v, r=round(ct$estimate,4), p=round(ct$p.value,4),
+         Significant=ifelse(ct$p.value<0.05,"Yes **","No"))
+}) %>% arrange(desc(abs(r)))
+```
+
+```{r heatmap, fig.height=8, fig.cap="Figure 3: Correlation heatmap with hierarchical clustering. Police expenditure and wage are the strongest crime correlates. Note the very strong negative correlation between Wage and BelowWage (r = -0.88)."}
+all_cont <- crime %>% select(CrimeRate,Youth,Education,ExpenditureYear0,LabourForce,
+                               Males,StateSize,YouthUnemployment,MatureUnemployment,Wage,BelowWage)
+ggcorrplot(cor(all_cont), hc.order=TRUE, type="lower", lab=TRUE, lab_size=3,
+           colors=c("#c0392b","white","#1a7abf"), outline.color="white",
+           title="Correlation Matrix — All Continuous Variables") +
+  mytheme + theme(axis.text.x=element_text(angle=45,hjust=1))
+```
+
+```{r top-predictors, fig.width=12, fig.cap="Figure 4: The three significant continuous predictors of crime rate. All show positive relationships — each is counterintuitive and requires interpretation."}
+top3 <- crime %>%
+  select(CrimeRate,ExpenditureYear0,Wage,StateSize,Southern) %>%
+  pivot_longer(c(ExpenditureYear0,Wage,StateSize),names_to="Predictor",values_to="Value") %>%
+  mutate(Predictor=recode(Predictor,
+    "ExpenditureYear0"="Police Expenditure (r=+0.65**)",
+    "Wage"="Median Wage (r=+0.42**)",
+    "StateSize"="State Size (r=+0.31*)"))
+ggplot(top3, aes(Value,CrimeRate,color=Southern)) +
+  geom_point(size=2.8,alpha=0.85) +
+  geom_smooth(method="lm",se=TRUE,aes(group=1),color="#2c3e50",fill="grey70",alpha=0.2) +
+  facet_wrap(~Predictor,scales="free_x") +
+  scale_color_manual(values=c("Non-Southern"="#2980b9","Southern"="#e74c3c")) +
+  labs(title="Top Three Predictors of Crime Rate",
+       subtitle="All three are positive — and all three require careful interpretation beyond face value",
+       x=NULL,y="Crime Rate",color="Region") + mytheme
+```
+
+---
+
+## 3. The Three Paradoxes
+
+### Paradox 1 — Police Expenditure: Spending Cause Crime or Respond to It?
+
+The strongest predictor of crime is police expenditure (r = +0.65). At first glance this seems absurd — more police spending leads to more crime? The obvious alternative is **reverse causation**: high-crime states spend more on policing *because* of high crime.
+
+But we can test this. If reverse causation fully explains the relationship, then **Year 0 spending should not predict Year 10 crime** — because the spending is responding to current crime, not causing future crime.
+
+```{r expenditure-paradox}
+data.frame(
+  Test = c("Exp(Year 0) vs Crime(Year 0)","Exp(Year 0) vs Crime(Year 10)"),
+  r    = round(c(cor(crime$ExpenditureYear0,crime$CrimeRate),
+                  cor(crime$ExpenditureYear0,crime$CrimeRate10)),4),
+  p    = round(c(cor.test(crime$ExpenditureYear0,crime$CrimeRate)$p.value,
+                  cor.test(crime$ExpenditureYear0,crime$CrimeRate10)$p.value),4)
+)
+```
+
+```{r exp-paradox-plot, fig.cap="Figure 5: Year 0 police expenditure predicts Year 10 crime almost as strongly as Year 0 crime. Pure reverse causation cannot explain this forward-looking relationship."}
+r_exp10 <- round(cor(crime$ExpenditureYear0,crime$CrimeRate10),3)
+ggplot(crime, aes(ExpenditureYear0,CrimeRate10,color=Southern)) +
+  geom_point(size=3,alpha=0.85) +
+  geom_smooth(method="lm",se=TRUE,aes(group=1),color="#2c3e50",fill="grey70",alpha=0.2) +
+  scale_color_manual(values=c("Non-Southern"="#2980b9","Southern"="#e74c3c")) +
+  labs(title="The Expenditure Paradox: Year 0 Spending → Year 10 Crime",
+       subtitle=paste0("r = ",r_exp10,", p < 0.001  ·  Forward-looking prediction rules out pure reverse causation\n",
+                       "Interpretation: high-crime states invest heavily in policing, which becomes structurally embedded"),
+       x="Police Expenditure per Capita — Year 0",y="Crime Rate — Year 10",color="Region") + mytheme
+```
+
+> **Interpretation:** The relationship is likely **bidirectional and structural**. High-crime states invest more in policing. That investment becomes embedded in state infrastructure. States with historically high crime maintain high expenditure — and high crime — over time.
+
+### Paradox 2 — Wage: Does Prosperity Drive Crime?
+
+Higher wages are associated with more crime (r = +0.42). But the same states with higher wages have dramatically fewer families below the poverty line (r = −0.88 between Wage and BelowWage).
+
+```{r wage-paradox}
+data.frame(
+  Relationship = c("Wage vs CrimeRate","BelowWage vs CrimeRate","Wage vs BelowWage"),
+  r = round(c(cor(crime$Wage,crime$CrimeRate),
+               cor(crime$BelowWage,crime$CrimeRate),
+               cor(crime$Wage,crime$BelowWage)),4),
+  p = round(c(cor.test(crime$Wage,crime$CrimeRate)$p.value,
+               cor.test(crime$BelowWage,crime$CrimeRate)$p.value,
+               cor.test(crime$Wage,crime$BelowWage)$p.value),4)
+)
+```
+
+> **Interpretation:** Wage is a proxy for **urbanisation**. High-wage states tend to be more urban. Urban areas have higher crime rates (more density, more opportunity, more reporting) — but they also have greater prosperity and less poverty. Wage is not a direct driver of crime; it's a confounding variable capturing the urban/rural dimension.
+
+### Paradox 3 — Education: Why Doesn't Education Reduce Crime?
+
+```{r education-paradox}
+data.frame(
+  Test = c("Education(t0) vs Crime(t0)","Education(t10) vs Crime(t10)"),
+  r    = round(c(cor(crime$Education,crime$CrimeRate),
+                  cor(crime$Education10,crime$CrimeRate10)),4),
+  p    = round(c(cor.test(crime$Education,crime$CrimeRate)$p.value,
+                  cor.test(crime$Education10,crime$CrimeRate10)$p.value),4),
+  Direction = c("Positive (!)","Positive (!)")
+)
+```
+
+> More education is slightly (non-significantly) associated with more crime at both timepoints — the same urbanisation confound. More educated states tend to be more urban. The direct protective effect of education is masked by this confounding relationship.
+
+---
+
+## 4. Group Comparisons
+
+### Southern vs Non-Southern States
+
+```{r southern-comparison}
+vars_comp <- c("CrimeRate","Wage","Education","ExpenditureYear0","BelowWage")
+map_dfr(vars_comp, function(v) {
+  s  <- crime %>% filter(Southern=="Southern") %>% pull(v)
+  ns <- crime %>% filter(Southern=="Non-Southern") %>% pull(v)
+  tt <- t.test(s, ns, var.equal=FALSE)
+  tibble(Variable=v,
+         `South Mean`=round(mean(s),2),
+         `NonSouth Mean`=round(mean(ns),2),
+         `p-value`=round(tt$p.value,4),
+         `Cohen's d`=round(abs(cohens_d(s,ns)),3),
+         Significant=ifelse(tt$p.value<0.05,"Yes **","No"))
+})
+```
+
+```{r southern-plot, fig.width=14, fig.cap="Figure 6: Southern states show similar crime rates to non-Southern states but dramatically worse socioeconomic conditions across every measured variable."}
+south_long <- crime %>%
+  select(Southern,CrimeRate,Wage,Education,ExpenditureYear0,BelowWage) %>%
+  pivot_longer(-Southern,names_to="Variable",values_to="Value") %>%
+  mutate(Variable=recode(Variable,
+    "CrimeRate"="Crime Rate\n(p=0.691)",
+    "Wage"="Median Wage\n(p<0.001 **)",
+    "Education"="Education Years\n(p=0.001 **)",
+    "ExpenditureYear0"="Police Expenditure\n(p=0.005 **)",
+    "BelowWage"="Below Poverty\n(p<0.001 **)"))
+ggplot(south_long, aes(Southern,Value,fill=Southern)) +
+  geom_boxplot(alpha=0.75,width=0.5) +
+  geom_jitter(width=0.12,alpha=0.5,size=1.8,color="grey30") +
+  facet_wrap(~Variable,scales="free_y",nrow=1) +
+  scale_fill_manual(values=c("Non-Southern"="#2980b9","Southern"="#e74c3c")) +
+  labs(title="Southern States: Similar Crime Rates, Very Different Conditions",
+       subtitle="Wages, education, spending, and poverty all differ significantly — crime rate does not",
+       x=NULL,y=NULL) +
+  mytheme + theme(legend.position="none",axis.text.x=element_text(angle=30,hjust=1))
+```
+
+> **Key insight:** Southern states have lower wages, less education, lower police expenditure, and more families in poverty — yet their crime rates are not significantly higher. This suggests that crime rate is determined by a complex combination of factors that don't reduce to simple economic disadvantage, and that the structural embedding of crime patterns (see Section 6) may be as important as current conditions.
+
+### High vs Low Youth Unemployment
+
+```{r youth-unemployment}
+high <- crime %>% filter(HighYouthUnemploy=="High")
+low  <- crime %>% filter(HighYouthUnemploy=="Low")
+tt   <- t.test(high$CrimeRate, low$CrimeRate, var.equal=FALSE)
+cat(sprintf("High (n=%d): mean=%.1f  |  Low (n=%d): mean=%.1f\nt=%.3f  p=%.3f  d=%.3f",
+            nrow(high), mean(high$CrimeRate), nrow(low), mean(low$CrimeRate),
+            tt$statistic, tt$p.value, abs(cohens_d(high$CrimeRate, low$CrimeRate))))
+```
+
+> Borderline result (p = 0.062) with a medium effect size (d ≈ 0.60). This is likely a **Type II error** — the sample of 47 states is insufficient to reliably detect a moderate group difference. With a larger dataset, this would likely reach significance.
+
+---
+
+## 5. Multiple Linear Regression
+
+### Building the Model
+
+```{r regression}
+model <- lm(CrimeRate ~ LogExpenditure + Wage + StateSize + BelowWage, data=crime)
+summary(model)
+```
+
+```{r regression-assumptions}
+sw <- shapiro.test(residuals(model))
+cat(sprintf("Shapiro-Wilk on residuals: W=%.4f  p=%.4f  [%s]",
+            sw$statistic, sw$p.value, ifelse(sw$p.value>0.05,"Normal ✓","Not Normal ✗")))
+```
+
+```{r actual-predicted, fig.cap="Figure 7: The model predicts crime rate well — points cluster tightly around the diagonal. R² = 0.629 means the four predictors together explain 63% of variance in crime rate."}
+crime$predicted <- fitted(model)
+ggplot(crime, aes(predicted,CrimeRate,color=Southern)) +
+  geom_point(size=3,alpha=0.85) +
+  geom_abline(slope=1,intercept=0,linetype="dashed",color="grey40",linewidth=1) +
+  geom_smooth(method="lm",se=FALSE,aes(group=1),color="#2c3e50",linewidth=0.8) +
+  scale_color_manual(values=c("Non-Southern"="#2980b9","Southern"="#e74c3c")) +
+  labs(title="Multiple Regression: Predicted vs Actual Crime Rate",
+       subtitle=paste0("R² = ",round(summary(model)$r.squared,3),
+                       "  |  Adjusted R² = ",round(summary(model)$adj.r.squared,3)),
+       x="Predicted",y="Actual",color="Region") + mytheme
+```
+
+```{r residuals-plot, fig.cap="Figure 8: Residuals show roughly even spread — homoscedasticity is approximately satisfied."}
+crime$residuals <- residuals(model)
+ggplot(crime, aes(predicted,residuals)) +
+  geom_point(color="#2980b9",size=3,alpha=0.8) +
+  geom_hline(yintercept=0,linetype="dashed",color="grey40",linewidth=1) +
+  geom_smooth(se=FALSE,color="#e74c3c",linewidth=0.9) +
+  labs(title="Residual Plot — Homoscedasticity Check",
+       x="Fitted Values",y="Residuals") + mytheme
+```
+
+```{r coef-plot, fig.cap="Figure 9: Standardised coefficients allow direct comparison of predictor importance. Log(Expenditure) and Wage are the dominant predictors."}
+std_model <- lm(scale(CrimeRate) ~ scale(LogExpenditure)+scale(Wage)+
+                  scale(StateSize)+scale(BelowWage), data=crime)
+coef_df <- data.frame(
+  Predictor = c("Log(Police Expenditure)","Median Wage","State Size","Below-Wage Families"),
+  Beta      = coef(std_model)[-1],
+  SE        = summary(std_model)$coefficients[-1,2],
+  p_val     = summary(std_model)$coefficients[-1,4]
+) %>% mutate(
+  Significant=ifelse(p_val<0.05,"Significant (p<0.05)","Not significant")
+) %>% arrange(abs(Beta))
+coef_df$Predictor <- factor(coef_df$Predictor,levels=coef_df$Predictor)
+
+ggplot(coef_df, aes(Beta,Predictor,color=Significant)) +
+  geom_vline(xintercept=0,linetype="dashed",color="grey50") +
+  geom_errorbarh(aes(xmin=Beta-1.96*SE,xmax=Beta+1.96*SE),height=0.2,linewidth=1.1) +
+  geom_point(size=5) +
+  scale_color_manual(values=c("Significant (p<0.05)"="#1a7abf","Not significant"="#e74c3c")) +
+  labs(title="Standardised Regression Coefficients",
+       subtitle="95% CI error bars  ·  All predictors on same scale",
+       x="Standardised β",y=NULL,color=NULL) + mytheme
+```
+
+### Model Summary
+
+| Metric | Value |
+|---|---|
+| R² | `r round(summary(model)$r.squared, 3)` |
+| Adjusted R² | `r round(summary(model)$adj.r.squared, 3)` |
+| Residuals normal (Shapiro-Wilk) | `r ifelse(shapiro.test(residuals(model))$p.value > 0.05, "Yes ✓", "No ✗")` |
+| Dominant predictor | Log(Police Expenditure) |
+
+> Four predictors explain **`r round(summary(model)$r.squared*100,1)`%** of variance in state crime rates. This is a strong result for observational social science data. The dominant predictor — log(police expenditure) — reflects the structural embedding discussed in Paradox 1.
+
+---
+
+## 6. Longitudinal Analysis: 10-Year Persistence
+
+### Did Crime Rates Change Overall?
+
+```{r longitudinal-ttest}
+tt_long <- t.test(crime$CrimeRate, crime$CrimeRate10, paired=TRUE)
+cat(sprintf("Paired t-test: t=%.3f  p=%.3f\nMean change: %.2f  SD: %.2f\nIncreased: %d/47  Decreased: %d/47",
+            tt_long$statistic, tt_long$p.value,
+            mean(crime$CrimeChange), sd(crime$CrimeChange),
+            sum(crime$CrimeChange>0), sum(crime$CrimeChange<0)))
+```
+
+No significant overall change (p = 0.640) — but 27 states increased and 20 decreased, with the average change near zero.
+
+### The Persistence Finding
+
+```{r persistence}
+r_persist <- cor.test(crime$CrimeRate, crime$CrimeRate10)
+cat(sprintf("r = %.4f  p < 0.001", r_persist$estimate))
+```
+
+```{r persistence-plot, fig.cap="Figure 10: Near-perfect correlation between Year 0 and Year 10 crime rates. A state's crime rank is essentially locked in — structural change is minimal over a decade."}
+ggplot(crime, aes(CrimeRate,CrimeRate10,color=Southern)) +
+  geom_point(size=3,alpha=0.85) +
+  geom_abline(slope=1,intercept=0,linetype="dashed",color="grey50",linewidth=1) +
+  geom_smooth(method="lm",se=TRUE,aes(group=1),color="#2c3e50",fill="grey70",alpha=0.2) +
+  scale_color_manual(values=c("Non-Southern"="#2980b9","Southern"="#e74c3c")) +
+  annotate("text",x=55,y=170,
+           label=paste0("r = ",round(r_persist$estimate,3),"\np < 0.001"),
+           size=4.5,color="#1F4E79",fontface="bold",hjust=0) +
+  labs(title=paste0("Crime Rate Persistence Across 10 Years  (r = ",
+                    round(r_persist$estimate,3),")"),
+       subtitle="States maintain their relative crime ranking almost perfectly over a decade",
+       x="Crime Rate — Year 0",y="Crime Rate — Year 10",
+       caption="Above diagonal = increased; below = decreased",
+       color="Region") + mytheme
+```
+
+```{r change-plot, fig.cap="Figure 11: Individual state changes are modest and roughly balanced — no systemic direction of change, consistent with the non-significant paired t-test."}
+crime %>%
+  mutate(State=row_number(),
+         Direction=ifelse(CrimeChange>0,"Increased","Decreased")) %>%
+  ggplot(aes(x=reorder(State,CrimeChange),y=CrimeChange,fill=Direction)) +
+  geom_col(alpha=0.85) +
+  geom_hline(yintercept=0,color="grey30",linewidth=0.8) +
+  geom_hline(yintercept=mean(crime$CrimeChange),linetype="dashed",color="#2c3e50",linewidth=1) +
+  scale_fill_manual(values=c("Increased"="#e74c3c","Decreased"="#27ae60")) +
+  labs(title="Crime Rate Change per State Over 10 Years",
+       subtitle=paste0("27 increased, 20 decreased  |  Mean change = ",
+                       round(mean(crime$CrimeChange),2)," (p = 0.640, not significant)"),
+       x="States (ordered by change)",y="Change in Crime Rate",fill="Direction") +
+  mytheme + theme(axis.text.x=element_blank(),axis.ticks.x=element_blank())
+```
+
+---
+
+## 7. Summary of Findings
+
+| Finding | Result | Interpretation |
+|---|---|---|
+| **Strongest predictor** | Police expenditure (r=+0.65) | Structural bidirectional relationship — not simple causation |
+| **Wage paradox** | r=+0.42 with crime | Urbanisation confound — wealth and crime co-occur in urban states |
+| **Education** | r=+0.16, not significant | Same urbanisation confound masks protective effect |
+| **Southern states** | Crime p=0.691 (ns) | Similar crime, but lower wages/education/spending, more poverty |
+| **Youth unemployment** | p=0.062 (borderline) | Medium effect — likely Type II error with n=47 |
+| **Regression R²** | 0.629 | Four predictors explain 63% of crime rate variance |
+| **10-year persistence** | r=0.997 | Crime rate is a deeply structural state characteristic |
+| **Overall change** | p=0.640 (ns) | No significant change in mean crime rate over decade |
+
+> **Core insight:** Crime rates across US states reflect deep structural characteristics that persist almost unchanged over a decade. The predictors that matter — expenditure, wage (as urbanisation proxy), state size — are themselves structural, slow-moving variables. Short-term policy interventions are unlikely to shift crime rates materially; the patterns are embedded in the social and economic fabric of states.
+
+---
+
+*Analysis in R — tidyverse, ggplot2, ggcorrplot. Mayerfeld Data Analytics Certificate — Week 3.*
