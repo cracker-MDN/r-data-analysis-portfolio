@@ -1,0 +1,363 @@
+---
+title: "Who Survived the Titanic — and Why?"
+subtitle: "Class, Gender, Age, Family & Nationality: A Statistical Investigation"
+author: "MD Noornabi | Mayerfeld Data Analytics Certificate"
+date: "March 2026"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: show
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE,
+                      fig.width=9, fig.height=5, dpi=150)
+knitr::opts_knit$set(root.dir="C:/Users/Sam Fisher/Desktop/04-titanic")
+```
+
+---
+
+## Background
+
+On April 14–15, 1912, the RMS Titanic sank in the North Atlantic with the loss of 809 of its 1,309 recorded passengers. This analysis uses passenger-level data to answer a deceptively simple question: **who survived — and why?**
+
+Five factors are investigated systematically: gender, passenger class, age, family size, and nationality. Each tells part of the story. Together, they reveal that survival on the Titanic was not random — it was almost entirely determined by social structure.
+
+---
+
+## Setup
+
+```{r libraries}
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(scales)
+
+mytheme <- theme_minimal(base_size=13) +
+  theme(plot.title=element_text(face="bold",size=14,color="#1F4E79"),
+        plot.subtitle=element_text(color="grey40",size=11),
+        plot.caption=element_text(color="grey55",size=9,face="italic"),
+        panel.grid.minor=element_blank(), legend.position="bottom")
+
+surv_colors  <- c("Survived"="#27AE60","Died"="#E74C3C")
+class_colors <- c("1st Class"="#1A5276","2nd Class"="#2980B9","3rd Class"="#85C1E9")
+gender_colors<- c("Male"="#2980B9","Female"="#E74C3C")
+```
+
+```{r load-data}
+titanic <- read.csv("data/Titanic.csv", stringsAsFactors=FALSE, na.strings=c("","NA"," ")) %>%
+  mutate(
+    survived    = factor(survived, levels=c(0,1), labels=c("Died","Survived")),
+    pclass      = factor(pclass,   levels=c(1,2,3), labels=c("1st Class","2nd Class","3rd Class")),
+    Gender      = factor(Gender,   levels=c(0,1),   labels=c("Male","Female")),
+    Residence   = factor(Residence,levels=c(0,1,2), labels=c("American","British","Other")),
+    age         = as.numeric(age),
+    fare        = as.numeric(fare),
+    family_size = as.integer(sibsp) + as.integer(parch),
+    survived_num= as.integer(survived=="Survived")
+  )
+cat("n =", nrow(titanic), "| Survived:", sum(titanic$survived=="Survived"),
+    "(", round(mean(titanic$survived_num)*100,1), "%)")
+```
+
+---
+
+## 1. Exploratory Data Analysis & Missing Data Audit
+
+```{r missing-data}
+data.frame(
+  Variable = names(titanic),
+  Missing  = sapply(titanic, function(x) sum(is.na(x))),
+  Pct      = round(sapply(titanic, function(x) sum(is.na(x)))/nrow(titanic)*100,1)
+) %>% filter(Missing > 0) %>% arrange(desc(Pct))
+```
+
+> **Critical note on missing age data (20.1%):** The missingness is not random. Of the 263 missing age values, 190 belong to passengers who died vs 73 who survived. This likely reflects lower-class passengers — who were disproportionately less documented — being disproportionately represented in the deaths. Age findings must be interpreted with this bias in mind.
+
+```{r survival-overview, fig.cap="Figure 1: Overall, 38.2% of passengers survived — but this average masks enormous variation by class, gender and other factors."}
+titanic %>% count(survived) %>%
+  mutate(pct=n/sum(n)*100) %>%
+  ggplot(aes(survived, n, fill=survived)) +
+  geom_col(width=0.45, alpha=0.85) +
+  geom_text(aes(label=paste0(n,"\n(",round(pct,1),"%)")),
+            vjust=-0.3, size=5, fontface="bold") +
+  scale_fill_manual(values=surv_colors) +
+  scale_y_continuous(limits=c(0,950)) +
+  labs(title="Titanic: Overall Survival", subtitle="500 survived of 1,309 passengers",
+       x=NULL, y="Count") + mytheme + theme(legend.position="none")
+```
+
+---
+
+## 2. "Women and Children First" — Did the Protocol Hold?
+
+```{r gender-stats}
+titanic %>% group_by(Gender) %>%
+  summarise(n=n(), Survived=sum(survived_num),
+            `Survival Rate`=paste0(round(mean(survived_num)*100,1),"%"))
+```
+
+```{r gender-chi}
+gender_chi <- chisq.test(table(titanic$Gender, titanic$survived))
+f_s <- sum(titanic$Gender=="Female" & titanic$survived=="Survived")
+f_d <- sum(titanic$Gender=="Female" & titanic$survived=="Died")
+m_s <- sum(titanic$Gender=="Male"   & titanic$survived=="Survived")
+m_d <- sum(titanic$Gender=="Male"   & titanic$survived=="Died")
+or_gender <- (f_s/f_d)/(m_s/m_d)
+cat(sprintf("χ² = %.1f,  p < 0.001\nOdds Ratio (Female vs Male) = %.2fx",
+            gender_chi$statistic, or_gender))
+```
+
+```{r wc-first-plot, fig.cap="Figure 2: The protocol was followed in aggregate — but women in 3rd class (49.1%) had lower survival than men in 1st class (34.1%), revealing that class overrode gender for passengers in steerage."}
+wc_df <- data.frame(
+  Group = c("Women","Children (<18)","Adult Men"),
+  Pct   = c(mean(titanic$survived_num[titanic$Gender=="Female"])*100,
+             mean(titanic$survived_num[!is.na(titanic$age)&titanic$age<18])*100,
+             mean(titanic$survived_num[titanic$Gender=="Male"])*100),
+  n     = c(sum(titanic$Gender=="Female"),
+             sum(!is.na(titanic$age)&titanic$age<18),
+             sum(titanic$Gender=="Male"))
+)
+ggplot(wc_df, aes(Group, Pct, fill=Group)) +
+  geom_col(alpha=0.85, width=0.45) +
+  geom_text(aes(label=paste0(round(Pct,1),"%\n(n=",n,")")), vjust=-0.3, size=4.5, fontface="bold") +
+  scale_fill_manual(values=c("Women"="#E74C3C","Children (<18)"="#F39C12","Adult Men"="#2980B9")) +
+  scale_y_continuous(limits=c(0,90), labels=function(x) paste0(x,"%")) +
+  labs(title='"Women and Children First" — Three-Group Comparison',
+       x=NULL, y="Survival Rate") + mytheme + theme(legend.position="none")
+```
+
+### The Hidden Inequality: Children by Class
+
+```{r children-by-class, fig.cap="Figure 3: 'Women and children first' only applied in 1st and 2nd class. A 3rd class child had a 36.8% survival rate — comparable to adult passengers overall."}
+titanic %>% filter(!is.na(age) & age < 18) %>%
+  group_by(pclass) %>%
+  summarise(n=n(), `Survival Rate`=paste0(round(mean(survived_num)*100,1),"%"),
+            Survived=sum(survived_num))
+```
+
+```{r children-plot}
+titanic %>% filter(!is.na(age) & age < 18) %>%
+  group_by(pclass) %>%
+  summarise(n=n(), pct=mean(survived_num)*100) %>%
+  ggplot(aes(pclass, pct, fill=pclass)) +
+  geom_col(alpha=0.85, width=0.45) +
+  geom_text(aes(label=paste0(round(pct,1),"%\n(n=",n,")")), vjust=-0.3, size=4.5, fontface="bold") +
+  scale_fill_manual(values=class_colors) +
+  scale_y_continuous(limits=c(0,105), labels=function(x) paste0(x,"%")) +
+  labs(title="Children's Survival by Class: The Protocol Only Held for Upper Classes",
+       x=NULL, y="Survival Rate (children <18)") +
+  mytheme + theme(legend.position="none")
+```
+
+---
+
+## 3. Class: The Dominant Survival Factor
+
+```{r class-stats}
+class_chi <- chisq.test(table(titanic$pclass, titanic$survived))
+c1s <- sum(titanic$pclass=="1st Class"&titanic$survived=="Survived")
+c1d <- sum(titanic$pclass=="1st Class"&titanic$survived=="Died")
+c3s <- sum(titanic$pclass=="3rd Class"&titanic$survived=="Survived")
+c3d <- sum(titanic$pclass=="3rd Class"&titanic$survived=="Died")
+cat(sprintf("χ² = %.1f,  p < 0.001\nOR (1st vs 3rd class) = %.2fx", class_chi$statistic, (c1s/c1d)/(c3s/c3d)))
+titanic %>% group_by(pclass) %>%
+  summarise(n=n(), Survived=sum(survived_num),
+            `Survival Rate`=paste0(round(mean(survived_num)*100,1),"%"),
+            `Mean Fare`=paste0("£",round(mean(fare,na.rm=TRUE),2)))
+```
+
+```{r class-gender-heatmap, fig.cap="Figure 4: The class × gender heatmap reveals the starkest finding in the dataset. A 3rd class woman (49.1%) was less likely to survive than a 1st class man (34.1%). Social class literally overrode the evacuation protocol."}
+titanic %>% group_by(pclass, Gender) %>%
+  summarise(n=n(), pct=mean(survived_num)*100, .groups="drop") %>%
+  ggplot(aes(Gender, pclass, fill=pct)) +
+  geom_tile(color="white", linewidth=2) +
+  geom_text(aes(label=paste0(round(pct,1),"%\n(n=",n,")")),
+            size=4.5, fontface="bold", color="white") +
+  scale_fill_gradient2(low="#E74C3C",mid="#F39C12",high="#27AE60",
+                       midpoint=50,limits=c(0,100),labels=function(x) paste0(x,"%")) +
+  labs(title="Survival Rate: Class × Gender Interaction",
+       subtitle="3rd class women (49.1%) survived less often than 1st class men (34.1%)\nClass overrode gender in steerage",
+       x=NULL, y=NULL, fill="Survival %") + mytheme + theme(legend.position="right")
+```
+
+```{r fare-violin, fig.cap="Figure 5: Survivors paid substantially more for their tickets. The log scale reveals the spread within each group — 1st class fares ranged from £0 to £512."}
+titanic %>% filter(!is.na(fare) & fare > 0) %>%
+  ggplot(aes(survived, fare, fill=survived)) +
+  geom_violin(alpha=0.7, trim=TRUE) +
+  geom_boxplot(width=0.12, alpha=0.9, outlier.shape=NA) +
+  scale_y_log10(labels=function(x) paste0("£",x)) +
+  scale_fill_manual(values=surv_colors) +
+  labs(title="Ticket Fare by Survival (Log Scale)",
+       subtitle="Survivors paid avg £49.56 vs £23.80 for those who died  ·  p < 0.001",
+       x=NULL, y="Fare (log scale)") + mytheme + theme(legend.position="none")
+```
+
+---
+
+## 4. Family Size: The Non-Linear Sweet Spot
+
+```{r family-stats}
+titanic %>% group_by(family_size) %>%
+  summarise(n=n(), `Survival Rate`=paste0(round(mean(survived_num)*100,1),"%")) %>%
+  filter(n >= 5)
+```
+
+```{r family-anova}
+family_group_var <- case_when(
+  titanic$family_size==0 ~ "Solo",
+  titanic$family_size<=3 ~ "Small (1-3)",
+  TRUE ~ "Large (4+)"
+)
+fam_aov <- summary(aov(titanic$survived_num ~ family_group_var))
+cat(sprintf("ANOVA (family groups): F=%.1f,  p < 0.001", fam_aov[[1]]$`F value`[1]))
+```
+
+```{r family-plot, fig.cap="Figure 6: Survival peaks at family size 3 (69.8%) and collapses beyond 4. Passengers travelling alone (30.3%) fared significantly worse than those with small families — a finding rarely discussed in mainstream accounts of the Titanic."}
+titanic %>% group_by(family_size) %>%
+  summarise(n=n(), pct=mean(survived_num)*100) %>%
+  filter(n >= 5) %>%
+  ggplot(aes(factor(family_size), pct, fill=pct)) +
+  geom_col(alpha=0.85) +
+  geom_text(aes(label=paste0(round(pct,0),"%\n(n=",n,")")), vjust=-0.3, size=3.8) +
+  scale_fill_gradient2(low="#E74C3C",mid="#F39C12",high="#27AE60",midpoint=50,limits=c(0,100)) +
+  scale_y_continuous(limits=c(0,85), labels=function(x) paste0(x,"%")) +
+  labs(title="Survival Rate by Family Size: A Non-Linear Relationship",
+       subtitle="Sweet spot at family size 3 (69.8%)  ·  Cliff edge at 4+  ·  Solo = 30.3%",
+       x="Family Size", y="Survival Rate") + mytheme + theme(legend.position="none")
+```
+
+---
+
+## 5. British vs American: Testing the Newspaper Headline
+
+A 2010 newspaper article claimed more British passengers died "because they queued." Let's test this — and look for alternative explanations.
+
+```{r nationality-stats}
+titanic %>% filter(Residence %in% c("American","British")) %>%
+  group_by(Residence) %>%
+  summarise(n=n(), Survived=sum(survived_num),
+            `Survival Rate`=paste0(round(mean(survived_num)*100,1),"%"))
+```
+
+The survival gap is real and significant. But what explains it?
+
+```{r class-confound, fig.cap="Figure 7: 69.8% of American passengers were 1st class. Only 11.6% of British passengers were 1st class. The nationality survival gap is almost entirely explained by class composition."}
+titanic %>%
+  filter(Residence %in% c("American","British")) %>%
+  group_by(Residence, pclass) %>%
+  summarise(n=n(), .groups="drop") %>%
+  group_by(Residence) %>%
+  mutate(pct=n/sum(n)*100) %>%
+  ggplot(aes(Residence, pct, fill=pclass)) +
+  geom_col(alpha=0.85) +
+  geom_text(aes(label=paste0(round(pct,0),"%")),
+            position=position_stack(vjust=0.5), size=4, fontface="bold", color="white") +
+  scale_fill_manual(values=class_colors) +
+  scale_y_continuous(labels=function(x) paste0(x,"%")) +
+  labs(title="Class Composition by Nationality: The Confound Revealed",
+       subtitle="Americans were overwhelmingly 1st class · British were mostly 2nd and 3rd class\nThe 'queuing' story is a class story in disguise",
+       x=NULL, y="% of Nationality Group", fill="Class") + mytheme
+```
+
+> **Conclusion:** The British vs American survival gap (31.8% vs 56.2%) is real and statistically significant (p < 0.001). However, 69.8% of American passengers were 1st class compared to only 11.6% of British passengers. When you control for class, the gap narrows substantially. The "queuing" cultural explanation is not supported by the data — this is a class composition story.
+
+---
+
+## 6. Logistic Regression: Predicting Survival
+
+```{r logistic-model}
+titanic_complete <- titanic %>%
+  filter(!is.na(age) & !is.na(fare)) %>%
+  mutate(pclass_num=as.integer(pclass), gender_num=as.integer(Gender=="Female"))
+
+model <- glm(survived_num ~ gender_num + pclass_num + age + fare + family_size,
+             data=titanic_complete, family=binomial)
+summary(model)
+```
+
+```{r pseudo-r2}
+null_model <- glm(survived_num ~ 1, data=titanic_complete, family=binomial)
+pseudo_r2  <- 1 - logLik(model)/logLik(null_model)
+cat(sprintf("McFadden Pseudo-R² = %.4f", as.numeric(pseudo_r2)))
+```
+
+```{r odds-ratios, fig.cap="Figure 8: The odds ratio plot makes the magnitude viscerally clear. Being female increased survival odds by 11x. Each step down in class reduced odds by roughly 60%."}
+or_df <- data.frame(
+  Predictor=c("Female (vs Male)","Class (per step down)","Age (per year)","Fare (per £)","Family Size"),
+  OR   =exp(coef(model)[-1]),
+  Lower=exp(confint.default(model)[-1,1]),
+  Upper=exp(confint.default(model)[-1,2]),
+  p    =summary(model)$coefficients[-1,4]
+) %>% mutate(Significant=ifelse(p<0.05,"Significant","Not significant"),
+             Predictor=factor(Predictor,levels=rev(Predictor)))
+
+ggplot(or_df, aes(OR, Predictor, color=Significant)) +
+  geom_vline(xintercept=1,linetype="dashed",color="grey50",linewidth=1) +
+  geom_errorbarh(aes(xmin=Lower,xmax=Upper),height=0.25,linewidth=1.1) +
+  geom_point(size=5) +
+  geom_text(aes(label=paste0("OR=",round(OR,2))),hjust=-0.3,size=3.8,color="grey30") +
+  scale_color_manual(values=c("Significant"="#1A7ABF","Not significant"="#E74C3C")) +
+  scale_x_log10() +
+  labs(title="Logistic Regression: Odds Ratios for Survival",
+       subtitle=paste0("McFadden Pseudo-R² = ",round(as.numeric(pseudo_r2),3),
+                       "  ·  n = ",nrow(titanic_complete)," complete cases"),
+       x="Odds Ratio (log scale)",y=NULL,color=NULL,
+       caption="OR > 1 = higher survival odds  ·  Error bars = 95% CI") + mytheme
+```
+
+---
+
+## 7. Survival Archetypes
+
+```{r archetypes, fig.cap="Figure 9: The model translates findings into human terms. A 1st class woman had near-certain survival. A 3rd class man had less than 1-in-5 odds."}
+archetypes <- data.frame(
+  Archetype  =c("1st class woman, 30","2nd class woman, 30","3rd class woman, 25",
+                 "1st class man, 40","2nd class man, 30","3rd class man, 25"),
+  gender_num =c(1,1,1,0,0,0), pclass_num=c(1,2,3,1,2,3),
+  age        =c(30,30,25,40,30,25), fare=c(89,22,13,89,22,13), family_size=c(0,0,0,0,0,0)
+)
+archetypes$pred_prob <- predict(model, newdata=archetypes, type="response")*100
+archetypes$Outcome   <- ifelse(archetypes$pred_prob>=50,"Likely Survived","Likely Died")
+
+archetypes %>%
+  mutate(Archetype=factor(Archetype,levels=rev(Archetype))) %>%
+  ggplot(aes(pred_prob,Archetype,fill=Outcome)) +
+  geom_col(alpha=0.85,width=0.6) +
+  geom_vline(xintercept=50,linetype="dashed",color="grey40",linewidth=1) +
+  geom_text(aes(label=paste0(round(pred_prob,1),"%")),hjust=-0.2,size=4,fontface="bold") +
+  scale_fill_manual(values=c("Likely Survived"="#27AE60","Likely Died"="#E74C3C")) +
+  scale_x_continuous(limits=c(0,110),labels=function(x) paste0(x,"%")) +
+  labs(title="Predicted Survival Probability by Passenger Archetype",
+       subtitle="Logistic regression predictions  ·  Solo traveller  ·  Class-median fare\nDashed line = 50% threshold",
+       x="Predicted Survival Probability",y=NULL,fill=NULL,
+       caption="Predictions from logistic regression model") + mytheme
+```
+
+---
+
+## 8. Summary of Findings
+
+| Finding | Result | Significance |
+|---|---|---|
+| Overall survival | 38.2% (500/1,309) | — |
+| Gender effect | Female 72.7% vs Male 19.1% | χ²=363.6, p<0.001, **OR=11.3x** |
+| Class effect | 1st 61.9% → 2nd 43.0% → 3rd 25.5% | χ²=127.9, p<0.001, **OR=4.74x** |
+| Children by class | 1st/2nd ~87% vs 3rd 36.8% | Protocol only held for upper classes |
+| 3rd class women vs 1st class men | 49.1% vs 34.1% | Class overrode gender in steerage |
+| Family size sweet spot | Size 3: 69.8% — Size 7: 0% | ANOVA F=51.4, p<0.001 |
+| Fare (survivors vs died) | £49.56 vs £23.80 | t-test p<0.001 |
+| British vs American | 31.8% vs 56.2% | p<0.001 — **explained by class composition** |
+| Logistic regression | Pseudo-R²=0.32 | Gender + class dominate |
+| Age | p=0.077 | Not significant — missing data biased |
+
+> **Core conclusion:** Survival on the Titanic was not random — it was almost entirely structured by class and gender. The evacuation protocol ("women and children first") was followed, but only conditionally: it applied clearly to 1st and 2nd class passengers. For those in steerage, class was the overriding factor. A 3rd class woman was less likely to survive than a 1st class man.
+
+---
+
+*Analysis in R — tidyverse, ggplot2, gridExtra. Mayerfeld Data Analytics Certificate — Week 4.*
