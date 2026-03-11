@@ -17,6 +17,7 @@ output:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
                       fig.width = 8, fig.height = 5, dpi = 150)
+knitr::opts_knit$set(root.dir = "C:/Users/Sam Fisher/Desktop/01-birthweight")
 ```
 
 ---
@@ -47,7 +48,7 @@ mytheme <- theme_minimal(base_size = 13) +
 ```
 
 ```{r load-data}
-bw <- read.csv("C:/Users/Sam Fisher/Desktop/Birthweight Dataset/01-birthweight/data/Birthweight.csv")
+bw <- read.csv("C:/Users/Sam Fisher/Desktop/01-birthweight/data/Birthweight.csv")
 
 bw <- bw %>% mutate(
   smoker_label = factor(smoker, levels=c(0,1), labels=c("Non-Smoker","Smoker")),
